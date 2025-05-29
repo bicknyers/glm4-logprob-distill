@@ -1,0 +1,11 @@
+general_settings:
+  master_key: "sk-yourkeyhere"
+
+router_settings:
+  enable_pre_call_checks: false
+
+litellm_settings:
+  drop_params: true
+  log_raw_request_response: true
+  success_callback: ["langfuse"]
+  callbacks: logprobs_hook.proxy_handler_instance
