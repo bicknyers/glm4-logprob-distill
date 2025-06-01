@@ -6,7 +6,7 @@ data_config:
 
 combine: True
 freezeV: True
-max_input_length: 14336
+max_input_length: 12288
 max_output_length: 1024
 swanlab: "local"  # set to local if don`t use cloud
 
