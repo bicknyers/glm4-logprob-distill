@@ -1,14 +1,14 @@
 data_config:
-  train_file: train.jsonl
-  val_file: dev.jsonl
-  test_file: dev.jsonl
+  train_file: index.txt
+  val_file: index.txt
+  test_file: index.txt
   num_proc: 1
 
 combine: True
 freezeV: True
-max_input_length: 512
-max_output_length: 512
-# swanlab: "local"  # set to local if don`t use cloud
+max_input_length: 12288
+max_output_length: 128
+swanlab: "local"  # set to local if don`t use cloud
 
 training_args:
   # see `transformers.Seq2SeqTrainingArguments`
@@ -29,7 +29,7 @@ training_args:
   logging_steps: 10
   run_name: "glm4-lora-finetune"
   # settings for evaluation
-  per_device_eval_batch_size: 4
+  per_device_eval_batch_size: 1
   eval_strategy: steps
   eval_steps: 500
   # settings for optimizer
@@ -47,7 +47,7 @@ training_args:
 peft_config:
   peft_type: LORA
   task_type: CAUSAL_LM
-  r: 8
+  r: 1
   lora_alpha: 32
   lora_dropout: 0.1
   target_modules: ["q_proj", "k_proj", "v_proj"]

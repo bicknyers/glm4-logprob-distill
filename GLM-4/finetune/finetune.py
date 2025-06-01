@@ -26,7 +26,6 @@ from transformers import (
 )
 from transformers import DataCollatorForSeq2Seq as _DataCollatorForSeq2Seq
 from transformers import Seq2SeqTrainer as _Seq2SeqTrainer
-
 import torch.nn.functional as F
 
 
@@ -35,6 +34,20 @@ import torch.nn.functional as F
 # from torch_npu.contrib import transfer_to_npu
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
+
+
+class NPZDataset(Dataset):
+    def __init__(self, file_paths):
+        self.file_paths = file_paths
+
+    def __len__(self):
+        return len(self.file_paths)
+
+    def __getitem__(self, idx):
+        data = np.load(self.file_paths[idx])
+        tensor = torch.from_numpy(data['arr_0']).float() # Assuming data is stored under 'arr_0' key
+
+        return tensor, 0 # Return tensor and a dummy label (0)
 
 
 class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
@@ -445,47 +458,67 @@ def main(
     ft_config.data_config.logprob_mode = logprob_mode
 
     tokenizer, model = load_tokenizer_and_model(model_dir, peft_config=ft_config.peft_config)
-    data_manager = DataManager(data_dir, ft_config.data_config)
 
-    train_dataset = data_manager.get_dataset(
-        Split.TRAIN,
-        functools.partial(
-            process_batch,
-            tokenizer=tokenizer,
-            combine=ft_config.combine,
-            max_input_length=ft_config.max_input_length,
-            max_output_length=ft_config.max_output_length,
-            logprob_mode=ft_config.logprob_mode
-        ),
-        batched=True,
-    )
-    print("train_dataset:", train_dataset)
-    val_dataset = data_manager.get_dataset(
-        Split.VALIDATION,
-        functools.partial(
-            process_batch_eval,
-            tokenizer=tokenizer,
-            combine=ft_config.combine,
-            max_input_length=ft_config.max_input_length,
-            max_output_length=ft_config.max_output_length,
-        ),
-        batched=True,
-    )
-    if val_dataset is not None:
-        print("val_dataset:", val_dataset)
-    test_dataset = data_manager.get_dataset(
-        Split.TEST,
-        functools.partial(
-            process_batch_eval,
-            tokenizer=tokenizer,
-            combine=ft_config.combine,
-            max_input_length=ft_config.max_input_length,
-            max_output_length=ft_config.max_output_length,
-        ),
-        batched=True,
-    )
-    if test_dataset is not None:
-        print("test_dataset:", test_dataset)
+    if logprob_mode:
+        train_file_paths = []
+        val_file_paths = []
+        test_file_paths = []
+        with open(data_dir + ft_config.data_config.data_files['train'], 'r') as f:
+            for line in f:
+                train_file_paths.append(data_dir + line.strip())
+        with open(data_dir + ft_config.data_config.data_files['validation'], 'r') as f:
+            for line in f:
+                val_file_paths.append(data_dir + line.strip())
+        with open(data_dir + ft_config.data_config.data_files['test'], 'r') as f:
+            for line in f:
+                test_file_paths.append(data_dir + line.strip())
+        train_dataset = NPZDataset(train_file_paths)
+        val_dataset = NPZDataset(val_file_paths)
+        test_dataset = NPZDataset(test_file_paths)
+
+    else:
+        data_manager = DataManager(data_dir, ft_config.data_config)
+
+        train_dataset = data_manager.get_dataset(
+            Split.TRAIN,
+            functools.partial(
+                process_batch,
+                tokenizer=tokenizer,
+                combine=ft_config.combine,
+                max_input_length=ft_config.max_input_length,
+                max_output_length=ft_config.max_output_length,
+                logprob_mode=ft_config.logprob_mode
+            ),
+            batched=True,
+        )
+        val_dataset = data_manager.get_dataset(
+            Split.VALIDATION,
+            functools.partial(
+                process_batch_eval,
+                tokenizer=tokenizer,
+                combine=ft_config.combine,
+                max_input_length=ft_config.max_input_length,
+                max_output_length=ft_config.max_output_length,
+            ),
+            batched=True,
+        )
+        test_dataset = data_manager.get_dataset(
+            Split.TEST,
+            functools.partial(
+                process_batch_eval,
+                tokenizer=tokenizer,
+                combine=ft_config.combine,
+                max_input_length=ft_config.max_input_length,
+                max_output_length=ft_config.max_output_length,
+            ),
+            batched=True,
+        )
+        print("train_dataset:", train_dataset)
+        if val_dataset is not None:
+            print("val_dataset:", val_dataset)
+        if test_dataset is not None:
+            print("test_dataset:", test_dataset)
+
 
     ft_config.training_args.generation_config.pad_token_id = 151329
     ft_config.training_args.generation_config.eos_token_id = [151329, 151336, 151338]
