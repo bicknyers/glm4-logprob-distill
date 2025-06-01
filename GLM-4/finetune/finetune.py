@@ -44,10 +44,16 @@ class NPZDataset(Dataset):
         return len(self.file_paths)
 
     def __getitem__(self, idx):
-        data = np.load(self.file_paths[idx])
-        tensor = torch.from_numpy(data['arr_0']).float() # Assuming data is stored under 'arr_0' key
+        input_ids = []
+        labels = []
+        loss_masks = []
+        for id in idx:
+            temp = np.load(self.file_paths[id])
+            input_ids.append(torch.from_numpy(temp['input_ids']).to(torch.long))
+            labels.append(torch.from_numpy(temp['labels']))
+            loss_masks.append(torch.from_numpy(temp['loss_masks']))
 
-        return tensor, 0 # Return tensor and a dummy label (0)
+        return {'input_ids': input_ids, 'labels': labels, 'loss_masks': loss_masks}
 
 
 class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
