@@ -1,5 +1,8 @@
 .idea/
 
+GLM-4/my_data/*
+*.npz
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
