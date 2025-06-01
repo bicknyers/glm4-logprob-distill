@@ -21,7 +21,7 @@ def load_logprobs_jsonl(file_path):
     return data
 
 
-def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl", max_input_length = 32768, max_output_length = 4096, tokenizer_model = "THUDM/GLM-4-9B-0414"):
+def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl", max_input_length = 28672, max_output_length = 4096, tokenizer_model = "THUDM/GLM-4-9B-0414"):
     data = load_logprobs_jsonl(input_file)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, padding_side="left", trust_remote_code=True)
     batched_conv = data["messages"]
@@ -46,7 +46,7 @@ def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl
             if logprob_index > -1:
                 labels.append(logprobs[logprob_index])
             else:
-                labels.append([["!", -50]])
+                labels.append([["!", -100]])
 
         # We want to predict EOS
         input_ids.append(151336)
@@ -68,13 +68,16 @@ def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl
             labels_multi_hot.append(torch.sum(temp_stack, axis=0).to(dtype=torch.bfloat16))
 
         labels_multi_hot = torch.stack(labels_multi_hot)
-        labels_multi_hot = torch.where(labels_multi_hot == 0, torch.tensor(-50, dtype=torch.bfloat16), labels_multi_hot)
+        labels_multi_hot = torch.where(labels_multi_hot == 0, torch.tensor(-100, dtype=torch.bfloat16), labels_multi_hot)
         labels_multi_hot = labels_multi_hot.to('cpu')
         max_length = max_input_length + max_output_length + 1
 
         input_ids_np = np.array(input_ids[:max_length])
+        input_ids_np = np.pad(input_ids_np, (0,max_length-input_ids_np.shape[0]), constant_values=0)
         labels_np = labels_multi_hot[:max_length].to(dtype=torch.float32).numpy()
+        labels_np = np.pad(labels_np, ((0, max_length - labels_np.shape[0]),(0,0)), constant_values=-100)
         loss_masks_np = np.array(loss_masks[:max_length]).astype(np.float32)
+        loss_masks_np = np.pad(loss_masks_np, (0, max_length - loss_masks_np.shape[0]), constant_values=0)
 
         random_integer = np.random.randint(0, 999999999999)
         padded_string = f"{random_integer:012}"

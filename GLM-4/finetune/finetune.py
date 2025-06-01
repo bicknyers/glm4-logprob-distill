@@ -27,6 +27,7 @@ from transformers import (
 from transformers import DataCollatorForSeq2Seq as _DataCollatorForSeq2Seq
 from transformers import Seq2SeqTrainer as _Seq2SeqTrainer
 import torch.nn.functional as F
+from transformers.data.data_collator import pad_without_fast_tokenizer_warning
 
 
 # For Ascend NPU, please add this
@@ -49,31 +50,79 @@ class NPZDataset(Dataset):
         loss_masks = []
         for id in idx:
             temp = np.load(self.file_paths[id])
-            input_ids.append(torch.from_numpy(temp['input_ids']).to(torch.long))
-            labels.append(torch.from_numpy(temp['labels']))
-            loss_masks.append(torch.from_numpy(temp['loss_masks']))
+            input_ids.append(temp['input_ids'])
+            labels.append(temp['labels'])
+            loss_masks.append(temp['loss_masks'])
 
         return {'input_ids': input_ids, 'labels': labels, 'loss_masks': loss_masks}
 
 
 class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
     def __call__(self, features, return_tensors=None):
-        output_ids = [feature["output_ids"] for feature in features] if "output_ids" in features[0].keys() else None
-        if output_ids is not None:
-            max_output_length = max(len(out) for out in output_ids)
-            if self.pad_to_multiple_of is not None:
-                max_output_length = (
-                    (max_output_length + self.pad_to_multiple_of - 1)
-                    // self.pad_to_multiple_of
-                    * self.pad_to_multiple_of
-                )
-            for feature in features:
-                remainder = [self.tokenizer.pad_token_id] * (max_output_length - len(feature["output_ids"]))
-                if isinstance(feature["output_ids"], list):
-                    feature["output_ids"] = feature["output_ids"] + remainder
+        if (type(features[0]['labels']) is list) or (type(features[0]['labels']) is np.ndarray):
+            if return_tensors is None:
+                return_tensors = self.return_tensors
+
+            label_name = "label" if "label" in features[0].keys() else "labels"
+            labels = [feature[label_name] for feature in features] if label_name in features[0].keys() else None
+
+            # reconvert list[None] to None if necessary
+            # this might occur when we pass {..., "labels": None}
+            if labels is not None and all(label is None for label in labels):
+                labels = None
+            non_labels_features = [{k: v for k, v in feature.items() if k != label_name} for feature in features]
+
+            # run through tokenizer without labels to ensure no side effects
+            batch = pad_without_fast_tokenizer_warning(
+                self.tokenizer,
+                non_labels_features,
+                padding=self.padding,
+                max_length=self.max_length,
+                pad_to_multiple_of=self.pad_to_multiple_of,
+                return_tensors=return_tensors,
+            )
+
+            if labels is not None:
+                if isinstance(features[0][label_name], list):
+                    batch["labels"] = list(labels)
                 else:
-                    feature["output_ids"] = np.concatenate([feature["output_ids"], remainder]).astype(np.int64)
-        return super().__call__(features, return_tensors)
+                    batch["labels"] = np.stack(labels)
+
+            # reintroduce side effects via tokenizer that return respective datatypes for the `return_tensors` argument
+            if batch.get("labels", None) is not None:
+                batch["labels"] = torch.tensor(batch["labels"], dtype=torch.bfloat16)
+                batch["loss_masks"] = batch["loss_masks"].to(torch.bfloat16)
+            else:
+                batch["labels"] = None
+
+            # prepare decoder_input_ids
+            if (
+                    labels is not None
+                    and self.model is not None
+                    and hasattr(self.model, "prepare_decoder_input_ids_from_labels")
+            ):
+                decoder_input_ids = self.model.prepare_decoder_input_ids_from_labels(labels=batch["labels"])
+                batch["decoder_input_ids"] = decoder_input_ids
+
+            return batch
+
+        else:
+            output_ids = [feature["output_ids"] for feature in features] if "output_ids" in features[0].keys() else None
+            if output_ids is not None:
+                max_output_length = max(len(out) for out in output_ids)
+                if self.pad_to_multiple_of is not None:
+                    max_output_length = (
+                        (max_output_length + self.pad_to_multiple_of - 1)
+                        // self.pad_to_multiple_of
+                        * self.pad_to_multiple_of
+                    )
+                for feature in features:
+                    remainder = [self.tokenizer.pad_token_id] * (max_output_length - len(feature["output_ids"]))
+                    if isinstance(feature["output_ids"], list):
+                        feature["output_ids"] = feature["output_ids"] + remainder
+                    else:
+                        feature["output_ids"] = np.concatenate([feature["output_ids"], remainder]).astype(np.int64)
+            return super().__call__(features, return_tensors)
 
 
 class Seq2SeqTrainer(_Seq2SeqTrainer):
@@ -99,8 +148,8 @@ class Seq2SeqTrainer(_Seq2SeqTrainer):
 
                 labels_softmax = torch.nn.functional.softmax(labels, dim=-1)
 
-                # Create mask from labels (where labels != -50)
-                mask = (labels != -50).float()
+                # Create mask from labels (where labels != -100)
+                mask = (labels != -100).float()
 
                 # # Gather model's assigned logprobs for correct tokens
                 # model_logprobs = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
@@ -417,8 +466,8 @@ def load_tokenizer_and_model(
 
 def compute_metrics(eval_preds: EvalPrediction, tokenizer):
     batched_pred_ids, batched_label_ids = eval_preds
-    batched_pred_ids[batched_pred_ids == -50] = tokenizer.pad_token_id
-    batched_label_ids[batched_label_ids == -50] = tokenizer.pad_token_id
+    batched_pred_ids[batched_pred_ids == -100] = tokenizer.pad_token_id
+    batched_label_ids[batched_label_ids == -100] = tokenizer.pad_token_id
     metrics_dct = {"rouge-1": [], "rouge-2": [], "rouge-l": [], "bleu-4": []}
     for pred_ids, label_ids in zip(batched_pred_ids, batched_label_ids):
         pred_txt = tokenizer.decode(pred_ids).strip()

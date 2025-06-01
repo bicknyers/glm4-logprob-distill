@@ -6,12 +6,13 @@ data_config:
 
 combine: True
 freezeV: True
-max_input_length: 12288
-max_output_length: 128
+max_input_length: 28672
+max_output_length: 4096
 swanlab: "local"  # set to local if don`t use cloud
 
 training_args:
   # see `transformers.Seq2SeqTrainingArguments`
+  bf16: true
   output_dir: ./output
   max_steps: 3000
   # needed to be fit for the dataset
@@ -42,7 +43,7 @@ training_args:
     max_new_tokens: 512
   # set your absolute deepspeed path here
   # deepspeed: configs/ds_zero_3.json
-  deepspeed: configs/ds_zero_2.json
+  # deepspeed: configs/ds_zero_2.json
 
 peft_config:
   peft_type: LORA
