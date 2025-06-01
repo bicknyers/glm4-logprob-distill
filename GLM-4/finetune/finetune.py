@@ -27,6 +27,8 @@ from transformers import (
 from transformers import DataCollatorForSeq2Seq as _DataCollatorForSeq2Seq
 from transformers import Seq2SeqTrainer as _Seq2SeqTrainer
 
+import torch.nn.functional as F
+
 
 # For Ascend NPU, please add this
 # import torch_npu
@@ -56,6 +58,51 @@ class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
 
 
 class Seq2SeqTrainer(_Seq2SeqTrainer):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """
+        Override loss calculation to use token logprobs when available.
+        Falls back to standard cross-entropy when not in logprob_mode.
+        """
+        if hasattr(self.args, 'logprob_mode'):
+            if self.args.logprob_mode:
+                # Use precomputed logprobs from input data
+                labels = inputs.get("labels")
+
+                # Reshape inputs for model
+                outputs = model(
+                    input_ids=inputs.get("input_ids"),
+                    attention_mask=inputs.get("attention_mask")
+                )
+
+                # Get model's log probabilities for each token
+                logits = outputs.logits
+                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+                labels_softmax = torch.nn.functional.softmax(labels, dim=-1)
+
+                # Create mask from labels (where labels != -50)
+                mask = (labels != -50).float()
+
+                # # Gather model's assigned logprobs for correct tokens
+                # model_logprobs = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+                #
+                # # Combine with precomputed logprobs (weighted average)
+                # combined_probs = (0.7 * model_logprobs) + (0.3 * logprobs)
+
+                # Calculate loss
+                loss = F.kl_div(log_probs, labels_softmax, reduction="none") * mask
+                loss = loss.sum() / mask.sum()
+                loss = loss / log_probs.size()[0] # batchmean kl_div
+
+                return (loss, outputs) if return_outputs else loss
+
+            else:
+                # Standard cross-entropy loss
+                return super().compute_loss(model, inputs, return_outputs)
+        else:
+            # Standard cross-entropy loss
+            return super().compute_loss(model, inputs, return_outputs)
+
     def prediction_step(
         self,
         model: nn.Module,
@@ -89,6 +136,7 @@ class DataConfig(object):
     val_file: Optional[str] = None
     test_file: Optional[str] = None
     num_proc: Optional[int] = None
+    logprob_mode: bool = False  # Flag to enable logprob training
 
     @property
     def data_format(self) -> str:
@@ -114,6 +162,7 @@ class FinetuningConfig(object):
     max_output_length: int
     combine: bool
     freezeV: bool
+    logprob_mode: bool = False  # Main logprob mode flag
 
     training_args: Seq2SeqTrainingArguments = dc.field(
         default_factory=lambda: Seq2SeqTrainingArguments(output_dir="./output")
@@ -134,6 +183,9 @@ class FinetuningConfig(object):
             os.environ["SWANLAB_PROJ_NAME"] = "GLM4-Finetune"
         if self.swanlab == "local":
             os.environ["SWANLAB_MODE"] = "local"
+
+        # Propagate logprob_mode to training args for loss calculation
+        self.training_args.logprob_mode = self.logprob_mode
 
     @classmethod
     def from_dict(cls, **kwargs) -> "FinetuningConfig":
@@ -234,6 +286,7 @@ def process_batch(
     max_input_length: int,
     max_output_length: int,
     combine: bool,
+    logprob_mode: bool = False
 ) -> dict[str, list]:
     batched_conv = batch["messages"]
     batched_input_ids = []
@@ -345,8 +398,8 @@ def load_tokenizer_and_model(
 
 def compute_metrics(eval_preds: EvalPrediction, tokenizer):
     batched_pred_ids, batched_label_ids = eval_preds
-    batched_pred_ids[batched_pred_ids == -100] = tokenizer.pad_token_id
-    batched_label_ids[batched_label_ids == -100] = tokenizer.pad_token_id
+    batched_pred_ids[batched_pred_ids == -50] = tokenizer.pad_token_id
+    batched_label_ids[batched_label_ids == -50] = tokenizer.pad_token_id
     metrics_dct = {"rouge-1": [], "rouge-2": [], "rouge-l": [], "bleu-4": []}
     for pred_ids, label_ids in zip(batched_pred_ids, batched_label_ids):
         pred_txt = tokenizer.decode(pred_ids).strip()
@@ -381,8 +434,16 @@ def main(
         default="",
         help="If entered as yes, automatically use the latest save checkpoint. If it is a numerical example 12 15, use the corresponding save checkpoint. If the input is no, restart training",
     ),
+    logprob_mode: bool = typer.Option(
+        False,
+        "--logprob-mode",
+        help="Enable training with token log probabilities from preprocess_logprobs.py"
+    ),
 ):
     ft_config = FinetuningConfig.from_file(config_file)
+    ft_config.logprob_mode = logprob_mode
+    ft_config.data_config.logprob_mode = logprob_mode
+
     tokenizer, model = load_tokenizer_and_model(model_dir, peft_config=ft_config.peft_config)
     data_manager = DataManager(data_dir, ft_config.data_config)
 
@@ -394,6 +455,7 @@ def main(
             combine=ft_config.combine,
             max_input_length=ft_config.max_input_length,
             max_output_length=ft_config.max_output_length,
+            logprob_mode=ft_config.logprob_mode
         ),
         batched=True,
     )
@@ -427,6 +489,7 @@ def main(
 
     ft_config.training_args.generation_config.pad_token_id = 151329
     ft_config.training_args.generation_config.eos_token_id = [151329, 151336, 151338]
+    ft_config.training_args.logprob_mode = ft_config.logprob_mode
 
     trainer = Seq2SeqTrainer(
         model=model,
