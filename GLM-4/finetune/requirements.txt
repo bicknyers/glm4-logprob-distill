@@ -8,3 +8,4 @@ ruamel.yaml>=0.18.6
 typer>=0.13.0
 tqdm>=4.67.0
 mpi4py
+torchao

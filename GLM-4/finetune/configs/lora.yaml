@@ -12,6 +12,7 @@ swanlab: "local"  # set to local if don`t use cloud
 
 training_args:
   # see `transformers.Seq2SeqTrainingArguments`
+  optim: "adamw_torch_8bit"
   bf16: true
   output_dir: ./output
   max_steps: 12
