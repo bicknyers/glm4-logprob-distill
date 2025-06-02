@@ -16,6 +16,7 @@ from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 from peft import PeftConfig, get_peft_config, get_peft_model
 from rouge_chinese import Rouge
 from torch import nn
+from torch.distributed.tensor.parallel import loss_parallel
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -47,64 +48,28 @@ class NPZDataset(Dataset):
     def __getitem__(self, idx):
         input_ids = []
         labels = []
-        loss_masks = []
         for id in idx:
             temp = np.load(self.file_paths[id])
             input_ids.append(temp['input_ids'])
             labels.append(temp['labels'])
-            loss_masks.append(temp['loss_masks'])
 
-        return {'input_ids': input_ids, 'labels': labels, 'loss_masks': loss_masks}
+        return {'input_ids': input_ids, 'labels': labels}
 
 
 class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
     def __call__(self, features, return_tensors=None):
         if (type(features[0]['labels']) is list) or (type(features[0]['labels']) is np.ndarray):
-            if return_tensors is None:
-                return_tensors = self.return_tensors
+            batch = {}
+            input_ids = []
+            labels = []
+            for feature in features:
+                input_ids.append(feature['input_ids'])
+                labels.append(feature['labels'])
 
-            label_name = "label" if "label" in features[0].keys() else "labels"
-            labels = [feature[label_name] for feature in features] if label_name in features[0].keys() else None
+            batch['input_ids'] = torch.tensor(np.stack(input_ids))
+            batch['labels'] = torch.tensor(np.stack(labels), dtype=torch.bfloat16)
 
-            # reconvert list[None] to None if necessary
-            # this might occur when we pass {..., "labels": None}
-            if labels is not None and all(label is None for label in labels):
-                labels = None
-            non_labels_features = [{k: v for k, v in feature.items() if k != label_name} for feature in features]
-
-            # run through tokenizer without labels to ensure no side effects
-            batch = pad_without_fast_tokenizer_warning(
-                self.tokenizer,
-                non_labels_features,
-                padding=self.padding,
-                max_length=self.max_length,
-                pad_to_multiple_of=self.pad_to_multiple_of,
-                return_tensors=return_tensors,
-            )
-
-            if labels is not None:
-                if isinstance(features[0][label_name], list):
-                    batch["labels"] = list(labels)
-                else:
-                    batch["labels"] = np.stack(labels)
-
-            # reintroduce side effects via tokenizer that return respective datatypes for the `return_tensors` argument
-            if batch.get("labels", None) is not None:
-                batch["labels"] = torch.tensor(batch["labels"], dtype=torch.bfloat16)
-                batch["loss_masks"] = batch["loss_masks"].to(torch.bfloat16)
-            else:
-                batch["labels"] = None
-
-            # prepare decoder_input_ids
-            if (
-                    labels is not None
-                    and self.model is not None
-                    and hasattr(self.model, "prepare_decoder_input_ids_from_labels")
-            ):
-                decoder_input_ids = self.model.prepare_decoder_input_ids_from_labels(labels=batch["labels"])
-                batch["decoder_input_ids"] = decoder_input_ids
-
-            return batch
+            return [batch]
 
         else:
             output_ids = [feature["output_ids"] for feature in features] if "output_ids" in features[0].keys() else None
@@ -134,13 +99,10 @@ class Seq2SeqTrainer(_Seq2SeqTrainer):
         if hasattr(self.args, 'logprob_mode'):
             if self.args.logprob_mode:
                 # Use precomputed logprobs from input data
-                labels = inputs.get("labels")
+                labels = inputs[0]["labels"]
 
                 # Reshape inputs for model
-                outputs = model(
-                    input_ids=inputs.get("input_ids"),
-                    attention_mask=inputs.get("attention_mask")
-                )
+                outputs = model(input_ids=inputs[0]["input_ids"])
 
                 # Get model's log probabilities for each token
                 logits = outputs.logits
