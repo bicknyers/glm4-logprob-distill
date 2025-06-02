@@ -6,8 +6,8 @@ data_config:
 
 combine: True
 freezeV: True
-max_input_length: 12288
-max_output_length: 1024
+max_input_length: 16384
+max_output_length: 384
 swanlab: "local"  # set to local if don`t use cloud
 
 training_args:
@@ -41,7 +41,7 @@ training_args:
   predict_with_generate: true
   # see `transformers.GenerationConfig`
   generation_config:
-    max_new_tokens: 1024
+    max_new_tokens: 384
   # set your absolute deepspeed path here
   # deepspeed: configs/ds_zero_3.json
   # deepspeed: configs/ds_zero_2.json
