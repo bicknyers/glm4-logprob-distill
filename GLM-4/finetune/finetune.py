@@ -105,13 +105,13 @@ class Seq2SeqTrainer(_Seq2SeqTrainer):
                 outputs = model(input_ids=inputs[0]["input_ids"])
 
                 # Get model's log probabilities for each token
-                logits = outputs.logits
+                logits = outputs.logits.to(dtype=torch.bfloat16)
                 log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
 
                 labels_softmax = torch.nn.functional.softmax(labels, dim=-1)
 
                 # Create mask from labels (where labels != -100)
-                mask = (labels != -100).float()
+                mask = (labels != -100).to(dtype=torch.bfloat16)
 
                 # # Gather model's assigned logprobs for correct tokens
                 # model_logprobs = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
@@ -415,6 +415,14 @@ def load_tokenizer_and_model(
             use_cache=False,
             torch_dtype=torch.bfloat16,  # Must use BFloat 16
         )
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        else:
+            def make_inputs_require_grad(module, input, output):
+                output.requires_grad_(True)
+
+            model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
     else:
