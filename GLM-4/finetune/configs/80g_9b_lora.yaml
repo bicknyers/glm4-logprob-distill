@@ -1,7 +1,7 @@
 data_config:
   train_file: index.txt
-  val_file: index.txt
-  test_file: index.txt
+  val_file: eval_index.txt
+  test_file: eval_index.txt
   num_proc: 1
 
 combine: True

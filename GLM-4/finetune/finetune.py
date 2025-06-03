@@ -48,46 +48,53 @@ class NPZDataset(Dataset):
     def __getitem__(self, idx):
         input_ids = []
         labels = []
+        output_ids = []
         for id in idx:
             temp = np.load(self.file_paths[id])
             input_ids.append(temp['input_ids'])
-            labels.append(temp['labels'])
+            if 'labels' in temp:
+                labels.append(temp['labels'])
+            else:
+                output_ids.append(temp['output_ids'])
 
-        return {'input_ids': input_ids, 'labels': labels}
+        if len(labels) > 0:
+            return {'input_ids': input_ids, 'labels': labels}
+        else:
+            return {'input_ids': input_ids, 'output_ids': output_ids}
 
 
 class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
     def __call__(self, features, return_tensors=None):
-        if (type(features[0]['labels']) is list) or (type(features[0]['labels']) is np.ndarray):
-            batch = {}
-            input_ids = []
-            labels = []
-            for feature in features:
-                input_ids.append(feature['input_ids'])
-                labels.append(feature['labels'])
-
-            batch['input_ids'] = torch.tensor(np.stack(input_ids))
-            batch['labels'] = torch.tensor(np.stack(labels), dtype=torch.bfloat16)
-
-            return [batch]
-
-        else:
-            output_ids = [feature["output_ids"] for feature in features] if "output_ids" in features[0].keys() else None
-            if output_ids is not None:
-                max_output_length = max(len(out) for out in output_ids)
-                if self.pad_to_multiple_of is not None:
-                    max_output_length = (
-                        (max_output_length + self.pad_to_multiple_of - 1)
-                        // self.pad_to_multiple_of
-                        * self.pad_to_multiple_of
-                    )
+        if 'labels' in features[0]:
+            if (type(features[0]['labels']) is list) or (type(features[0]['labels']) is np.ndarray):
+                batch = {}
+                input_ids = []
+                labels = []
                 for feature in features:
-                    remainder = [self.tokenizer.pad_token_id] * (max_output_length - len(feature["output_ids"]))
-                    if isinstance(feature["output_ids"], list):
-                        feature["output_ids"] = feature["output_ids"] + remainder
-                    else:
-                        feature["output_ids"] = np.concatenate([feature["output_ids"], remainder]).astype(np.int64)
-            return super().__call__(features, return_tensors)
+                    input_ids.append(feature['input_ids'])
+                    labels.append(feature['labels'])
+
+                batch['input_ids'] = torch.tensor(np.stack(input_ids))
+                batch['labels'] = torch.tensor(np.stack(labels), dtype=torch.bfloat16)
+
+                return [batch]
+
+        output_ids = [feature["output_ids"] for feature in features] if "output_ids" in features[0].keys() else None
+        if output_ids is not None:
+            max_output_length = max(len(out) for out in output_ids)
+            if self.pad_to_multiple_of is not None:
+                max_output_length = (
+                    (max_output_length + self.pad_to_multiple_of - 1)
+                    // self.pad_to_multiple_of
+                    * self.pad_to_multiple_of
+                )
+            for feature in features:
+                remainder = [self.tokenizer.pad_token_id] * (max_output_length - len(feature["output_ids"]))
+                if isinstance(feature["output_ids"], list):
+                    feature["output_ids"] = feature["output_ids"] + remainder
+                else:
+                    feature["output_ids"] = np.concatenate([feature["output_ids"], remainder]).astype(np.int64)
+        return super().__call__(features, return_tensors)
 
 
 class Seq2SeqTrainer(_Seq2SeqTrainer):

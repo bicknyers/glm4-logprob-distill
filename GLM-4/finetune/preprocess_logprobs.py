@@ -21,7 +21,51 @@ def load_logprobs_jsonl(file_path):
     return data
 
 
-def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl", max_input_length = 28672, max_output_length = 4096, tokenizer_model = "THUDM/GLM-4-9B-0414"):
+def eval_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl", max_input_length = 16384, max_output_length = 384, tokenizer_model = "THUDM/GLM-4-9B-0414"):
+    data = load_logprobs_jsonl(input_file)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, padding_side="left", trust_remote_code=True)
+    batched_conv = data["messages"]
+    saved_files = []
+    for conv in batched_conv:
+        input_ids = [151331, 151333]
+
+        # Assume combined system + user + assistant + user + completion format
+        new_input_ids = tokenizer.apply_chat_template(conv, tokenize=True, return_dict=False)
+        input_ids = new_input_ids
+        last_assistant_index = len(input_ids) - input_ids[::-1].index(151337) - 1
+
+        output_prompt, output_ids = (
+            input_ids[:1],
+            input_ids[last_assistant_index:],
+        )
+
+        output_ids.append(151336)
+
+        input_ids_np = np.array(input_ids[:max_input_length] + output_prompt[:1])
+        # input_ids_np = np.pad(input_ids_np, (0,max_length-input_ids_np.shape[0]), constant_values=0)
+        output_ids_np = np.array(output_ids[:max_output_length])
+
+
+        random_integer = np.random.randint(0, 999999999999)
+        padded_string = f"{random_integer:012}"
+
+        outfile =  "output_" + padded_string + ".npz"
+
+        np.savez_compressed(Path(__file__).parent / outfile, input_ids=input_ids_np, output_ids=output_ids_np)
+
+        saved_files.append(outfile)
+
+    del batched_conv, conv, input_ids, new_input_ids
+    torch.cuda.empty_cache()
+
+    output_path = Path(__file__).parent / "eval_index.txt"
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(saved_files))
+
+    return
+
+
+def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl", max_input_length = 16384, max_output_length = 384, tokenizer_model = "THUDM/GLM-4-9B-0414"):
     data = load_logprobs_jsonl(input_file)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, padding_side="left", trust_remote_code=True)
     batched_conv = data["messages"]
@@ -187,7 +231,7 @@ def main():
 
     # cleaned_logprobs.jsonl -> *.npz
     logprobs_to_npz()
-
+    eval_to_npz()
 
 if __name__ == '__main__':
     main()
