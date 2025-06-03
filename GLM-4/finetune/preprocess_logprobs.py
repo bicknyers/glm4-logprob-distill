@@ -145,9 +145,52 @@ def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl
 def process_logprobs(input_path):
     """Process logprobs.json and filter tokens not in vocabulary"""
     try:
+        tokenizer = AutoTokenizer.from_pretrained("THUDM/GLM-Z1-Rumination-32B-0414", padding_side="left", trust_remote_code=True)
+
+        # deepseek_tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-0528", padding_side="left", trust_remote_code=True)
+        # glmz1_tokenizer = AutoTokenizer.from_pretrained("THUDM/GLM-Z1-Rumination-32B-0414", padding_side="left", trust_remote_code=True)
+        # print(list(deepseek_tokenizer.added_tokens_encoder.keys()))
+        # print(list(glmz1_tokenizer.added_tokens_encoder.keys()))
+
+        glm_special_tokens = ['<|endoftext|>', '[MASK]', '[gMASK]', '[sMASK]', '<sop>', '<eop>', '<|system|>',
+                              '<|user|>', '<|assistant|>', '<|observation|>', '<|begin_of_image|>', '<|end_of_image|>',
+                              '<|begin_of_video|>', '<|end_of_video|>']
+
+        deepseek_special_tokens = ['<｜begin▁of▁sentence｜>', '<｜end▁of▁sentence｜>', '<｜▁pad▁｜>', '<think>', '</think>',
+                                   '<｜fim▁hole｜>',
+                                   '<｜fim▁begin｜>', '<｜fim▁end｜>', '<｜User｜>', '<｜Assistant｜>', '<|EOT|>',
+                                   '<｜tool▁calls▁begin｜>',
+                                   '<｜tool▁calls▁end｜>', '<｜tool▁call▁begin｜>', '<｜tool▁call▁end｜>',
+                                   '<｜tool▁outputs▁begin｜>',
+                                   '<｜tool▁outputs▁end｜>', '<｜tool▁output▁begin｜>', '<｜tool▁output▁end｜>',
+                                   '<｜tool▁sep｜>']
+
+        deepseek_to_glm_no_map = {
+            "<｜User｜>": '<|user|>',
+            "<｜Assistant｜>": "<|assistant|>",
+        }
+
+        deepseek_to_glm_map = {
+            "<｜end▁of▁sentence｜>": "<|endoftext|>",
+        }
+
+        # Find/replace deepseek special tokens first
+        with open(input_path, 'r', encoding='utf-8') as f:
+            file_content = f.read()
+
+        file_content_replaced = file_content
+        f.close()
+        for deepseek, glm in zip(deepseek_to_glm_map.keys(), deepseek_to_glm_map.values()):
+            file_content_replaced = file_content_replaced.replace(deepseek, glm)
+
+        if file_content != file_content_replaced:
+            with open(input_path, 'w', encoding='utf-8') as f:
+                f.write(file_content_replaced)
+            f.close()
+
         with open(input_path, 'r', encoding='utf-8') as f:
             logprobs_data = json.load(f)
-            
+
         output = []
         for line in logprobs_data:
             temp_prompt = line['input']['args'][1]
@@ -159,7 +202,6 @@ def process_logprobs(input_path):
                     temp_str = ""
                     for sub_content in message['content']:
                         temp_str = temp_str + sub_content['text']
-                        print()
                     temp_dict['content'] = temp_str
                 else:
                     temp_dict['content'] = message['content']
@@ -172,7 +214,7 @@ def process_logprobs(input_path):
             prompt.append(temp_dict)
 
             conv = line['input']['args'][2]
-            tokenizer = AutoTokenizer.from_pretrained("THUDM/GLM-4-9B-0414", padding_side="left", trust_remote_code=True)
+
             tokenized_completion = tokenizer.tokenize(conv)
 
             logprobs = line['input']['args'][3]
@@ -186,26 +228,28 @@ def process_logprobs(input_path):
                     for top_logprob in top_logprobs:
                         if top_logprob['tk'] in tokenizer.vocab:
                             temp_logprobs.append([top_logprob['tk'], str(top_logprob['lp'])])
+                        elif top_logprob['tk'] in deepseek_special_tokens:
+                            print("WARNING: Unmapped Token " + top_logprob['tk'])
                 else:
                     latch_tokens = next_logprob['tk']
                     pop_index = 0
                     while latch_tokens != token:
                         if len(logprobs) < pop_index + 1:
                             pop_index = 0
-                            print(token)
                             latch_tokens = token
                             break
                         latch_tokens = latch_tokens + logprobs[pop_index]['tk']
                         pop_index += 1
                         if len(latch_tokens) > 32:
                             pop_index = 0
-                            print(token)
                             latch_tokens = token
                             break
                     for i in range(0, pop_index):
                         logprobs.pop(0)
                     # Number as strings makes DataManager behave
                     temp_logprobs.append([latch_tokens, "-0.00000001"])
+                    if latch_tokens in deepseek_special_tokens:
+                        print("WARNING: Unmapped Token " + latch_tokens)
                 write_logprobs.append(temp_logprobs)
                     
             output.append(json.dumps({
@@ -213,7 +257,6 @@ def process_logprobs(input_path):
                 "logprobs": write_logprobs
             }))
 
-        print()
         return output
     except FileNotFoundError:
         print(f"Error: File not found - {input_path}", file=sys.stderr)
