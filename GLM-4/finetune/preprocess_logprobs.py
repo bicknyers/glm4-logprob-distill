@@ -142,12 +142,12 @@ def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl
     return
 
 
-def process_logprobs(input_path):
+def process_logprobs(input_path, max_input_length=30000, max_output_length=2000, enforce_lengths=True):
     """Process logprobs.json and filter tokens not in vocabulary"""
     try:
         tokenizer = AutoTokenizer.from_pretrained("THUDM/GLM-Z1-Rumination-32B-0414", padding_side="left", trust_remote_code=True)
+        deepseek_tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-0528", padding_side="left", trust_remote_code=True)
 
-        # deepseek_tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-0528", padding_side="left", trust_remote_code=True)
         # glmz1_tokenizer = AutoTokenizer.from_pretrained("THUDM/GLM-Z1-Rumination-32B-0414", padding_side="left", trust_remote_code=True)
         # print(list(deepseek_tokenizer.added_tokens_encoder.keys()))
         # print(list(glmz1_tokenizer.added_tokens_encoder.keys()))
@@ -192,7 +192,9 @@ def process_logprobs(input_path):
             logprobs_data = json.load(f)
 
         output = []
+        line_index = 0
         for line in logprobs_data:
+            line_index += 1
             temp_prompt = line['input']['args'][1]
             prompt = []
             for message in temp_prompt:
@@ -251,11 +253,29 @@ def process_logprobs(input_path):
                     if latch_tokens in deepseek_special_tokens:
                         print("WARNING: Unmapped Token " + latch_tokens)
                 write_logprobs.append(temp_logprobs)
-                    
-            output.append(json.dumps({
-                "messages": prompt,
-                "logprobs": write_logprobs
-            }))
+
+            glm_input_len = len(tokenizer.apply_chat_template(prompt, tokenize=True, return_dict=False))
+            deepseek_input_len = len(deepseek_tokenizer.apply_chat_template(prompt, tokenize=True, return_dict=False))
+            print("INFO: Input Tokens Deepseek " + str(deepseek_input_len) + " -> GLM " + str(glm_input_len))
+            print("INFO: Input Tokens Ratio " + str(round(deepseek_input_len / glm_input_len, 4)))
+
+            if enforce_lengths:
+                # Use "+ 5" to account for special tokens/padding buffer
+                if glm_input_len + 5 <= max_input_length:
+                    if len(write_logprobs) + 5 <= max_output_length:
+                        output.append(json.dumps({
+                            "messages": prompt,
+                            "logprobs": write_logprobs
+                        }))
+                    else:
+                        print("WARNING: Output length exceeds max output length at line " + str(line_index) + ", dropping sample.")
+                else:
+                    print("WARNING: Input length exceeds max input length at line " + str(line_index) + ", dropping sample.")
+            else:
+                output.append(json.dumps({
+                    "messages": prompt,
+                    "logprobs": write_logprobs
+                }))
 
         return output
     except FileNotFoundError:
