@@ -66,7 +66,7 @@ class NPZDataset(Dataset):
 class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
     def __call__(self, features, return_tensors=None):
         if 'labels' in features[0]:
-            if (type(features[0]['labels']) is list) or (type(features[0]['labels']) is np.ndarray):
+            if type(features[0]['labels']) is np.ndarray:
                 batch = {}
                 input_ids = []
                 labels = []
@@ -105,6 +105,8 @@ class Seq2SeqTrainer(_Seq2SeqTrainer):
         """
         if hasattr(self.args, 'logprob_mode'):
             if self.args.logprob_mode:
+                accum_batch_size = torch.tensor(self.args.gradient_accumulation_steps, dtype=torch.bfloat16)
+
                 # Use precomputed logprobs from input data
                 labels = inputs[0]["labels"]
 
@@ -113,23 +115,18 @@ class Seq2SeqTrainer(_Seq2SeqTrainer):
 
                 # Get model's log probabilities for each token
                 logits = outputs.logits.to(dtype=torch.bfloat16)
-                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+                log_probs = torch.nn.functional.log_softmax(logits, dim=2)
 
-                labels_softmax = torch.nn.functional.softmax(labels, dim=-1)
+                # labels_softmax = torch.nn.functional.softmax(labels, dim=2)
 
                 # Create mask from labels (where labels != -100)
                 mask = (labels != -100).to(dtype=torch.bfloat16)
 
-                # # Gather model's assigned logprobs for correct tokens
-                # model_logprobs = log_probs.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
-                #
-                # # Combine with precomputed logprobs (weighted average)
-                # combined_probs = (0.7 * model_logprobs) + (0.3 * logprobs)
-
                 # Calculate loss
-                loss = F.kl_div(log_probs, labels_softmax, reduction="none") * mask
+                # loss = F.cross_entropy(input=logits, target=labels.exp(), reduction="none") * mask
+                loss = F.kl_div(log_probs, labels, reduction="none", log_target=True) * mask
                 loss = loss.sum() / mask.sum()
-                loss = loss / log_probs.size()[0] # batchmean kl_div
+                loss = loss / accum_batch_size # batchmean kl_div, hf trainer can't count logprob batches
 
                 return (loss, outputs) if return_outputs else loss
 
@@ -448,6 +445,7 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer):
     metrics_dct = {"rouge-1": [], "rouge-2": [], "rouge-l": [], "bleu-4": []}
     for pred_ids, label_ids in zip(batched_pred_ids, batched_label_ids):
         pred_txt = tokenizer.decode(pred_ids).strip()
+        print(pred_txt)
         label_txt = tokenizer.decode(label_ids).strip()
         pred_tokens = list(jieba.cut(pred_txt))
         label_tokens = list(jieba.cut(label_txt))
