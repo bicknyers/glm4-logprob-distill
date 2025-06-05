@@ -215,6 +215,7 @@ def process_logprobs(input_path, max_input_length=30000, max_output_length=2000,
         output = []
         line_index = 0
         for line in logprobs_data:
+            error_occured = False
             line_index += 1
             temp_prompt = line['input']['args'][1]
             prompt = []
@@ -245,7 +246,10 @@ def process_logprobs(input_path, max_input_length=30000, max_output_length=2000,
             write_logprobs = []
             for token in tokenized_completion:
                 temp_logprobs = []
-                next_logprob = logprobs.pop(0)
+                try:
+                    next_logprob = logprobs.pop(0)
+                except Exception as e:
+                    error_occured = True
                 if next_logprob['tk'] == token:
                     top_logprobs = next_logprob['tp']
                     for top_logprob in top_logprobs:
@@ -280,6 +284,8 @@ def process_logprobs(input_path, max_input_length=30000, max_output_length=2000,
                         print("WARNING: Unmapped Token " + latch_tokens)
                 write_logprobs.append(temp_logprobs)
 
+            if error_occured:
+                continue
             glm_input_len = len(tokenizer.apply_chat_template(prompt, tokenize=True, return_dict=False))
             deepseek_input_len = len(deepseek_tokenizer.apply_chat_template(prompt, tokenize=True, return_dict=False))
             print("INFO: Input Tokens Deepseek " + str(deepseek_input_len) + " -> GLM " + str(glm_input_len))
