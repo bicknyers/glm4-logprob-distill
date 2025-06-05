@@ -2,12 +2,12 @@ data_config:
   train_file: index.txt
   val_file: eval_index.txt
   test_file: eval_index.txt
-  num_proc: 1
+  num_proc: 2
 
 combine: True
 freezeV: True
-max_input_length: 30000
-max_output_length: 2000
+max_input_length: 24576
+max_output_length: 1536
 swanlab: "local"  # set to local if don`t use cloud
 
 training_args:
@@ -22,8 +22,8 @@ training_args:
   learning_rate: 8e-5
   # settings for data loading
   dataloader_drop_last: true
-  per_device_train_batch_size: 3
-  gradient_accumulation_steps: 3
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 2
   dataloader_num_workers: 4
   remove_unused_columns: false
   # settings for saving checkpoints
@@ -46,6 +46,6 @@ training_args:
   predict_with_generate: true
   # see `transformers.GenerationConfig`
   generation_config:
-    max_new_tokens: 2000
+    max_new_tokens: 1536
   # set your absolute deepspeed path here
   deepspeed: configs/ds_zero_2.json
