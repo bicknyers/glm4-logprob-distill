@@ -75,7 +75,9 @@ class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
                     labels.append(feature['labels'])
 
                 batch['input_ids'] = torch.tensor(np.stack(input_ids))
-                batch['labels'] = torch.tensor(np.stack(labels), dtype=torch.bfloat16)
+                labels = torch.tensor(np.stack(labels), dtype=torch.bfloat16)
+                batch['labels'] = labels
+                batch['mask_sum'] = torch.sum((labels != -100))
 
                 return [batch]
 
@@ -119,14 +121,11 @@ class Seq2SeqTrainer(_Seq2SeqTrainer):
 
                 # labels_softmax = torch.nn.functional.softmax(labels, dim=2)
 
-                # Create mask from labels (where labels != -100)
-                mask = (labels != -100).to(dtype=torch.bfloat16)
-
                 # Calculate loss
-                # loss = F.cross_entropy(input=logits, target=labels.exp(), reduction="none") * mask
-                loss = F.kl_div(log_probs, labels, reduction="none", log_target=True) * mask
-                loss = loss.sum() / mask.sum()
-                loss = loss / accum_batch_size # batchmean kl_div, hf trainer can't count logprob batches
+                # loss = F.cross_entropy(input=logits, target=labels.exp(), reduction="none")
+                loss = F.kl_div(log_probs, labels, reduction="none", log_target=True)
+                loss = loss * (labels != -100)
+                loss = loss.sum() / (inputs[0]['mask_sum'] * accum_batch_size) # batchmean kl_div, hf trainer can't count logprob batches
 
                 return (loss, outputs) if return_outputs else loss
 
