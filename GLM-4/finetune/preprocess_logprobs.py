@@ -37,7 +37,7 @@ def logprobs_to_standard(input_file = Path(__file__).parent / "cleaned_logprobs.
     return
 
 
-def eval_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl", max_input_length = 128, max_output_length = 128, tokenizer_model = "THUDM/GLM-4-9B-0414"):
+def eval_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl", max_input_length = 24576, max_output_length = 1536, tokenizer_model = "THUDM/GLM-4-9B-0414"):
     data = load_logprobs_jsonl(input_file)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, padding_side="left", trust_remote_code=True)
     batched_conv = data["messages"]
@@ -86,7 +86,7 @@ def eval_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl", m
     return
 
 
-def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl", max_input_length = 30000, max_output_length = 2000, tokenizer_model = "THUDM/GLM-4-9B-0414"):
+def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl", max_input_length = 24576, max_output_length = 1536, tokenizer_model = "THUDM/GLM-4-9B-0414", num_logprobs=8):
     data = load_logprobs_jsonl(input_file)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, padding_side="left", trust_remote_code=True)
     batched_conv = data["messages"]
@@ -94,67 +94,76 @@ def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl
     saved_files = []
     for conv, logprobs in zip(batched_conv, batched_logprobs):
         input_ids = [151331, 151333]
-        loss_masks = [False, False]
         # Assume combined system + user + assistant + user + completion format
         new_input_ids = tokenizer.apply_chat_template(conv, tokenize=True, return_dict=False)
         input_ids = new_input_ids
-        loss_masks = [False] * len(input_ids)
-
         last_assistant_index = len(input_ids) - input_ids[::-1].index(151337) - 1
 
-        for j in range(last_assistant_index + 2, len(input_ids)):
-            loss_masks[j] = True
-
         labels = []
+        label_indices = []
+        loss_mask_sums = []
+        found_assistant_tag = False
         for index in range(len(input_ids)):
             logprob_index = index-last_assistant_index-2
             if logprob_index > -1:
-                labels.append(logprobs[logprob_index])
+                temp_labels = []
+                temp_label_indices = []
+                temp_loss_mask_sum = 0
+                for pair in logprobs[logprob_index]:
+                    temp_labels.append(torch.tensor(float(pair[1]), dtype=torch.bfloat16))
+                    temp_label_indices.append(torch.tensor(tokenizer.convert_tokens_to_ids(pair[0]), dtype=torch.long))
+                    temp_loss_mask_sum += 1
+                labels.append(torch.stack(temp_labels).repeat(num_logprobs)[0:num_logprobs])
+                label_indices.append(torch.stack(temp_label_indices).repeat(num_logprobs)[0:num_logprobs])
+                loss_mask_sums.append(temp_loss_mask_sum)
             else:
-                labels.append([["!", -100]])
+                if input_ids[index] == 151337:
+                    found_assistant_tag = True
+                elif found_assistant_tag:
+                    # Edge case where logprobs doesn't capture token 198 inbetween assist. tag and start of answer
+                    labels.append(torch.tensor(float("-0.00000001"), dtype=torch.bfloat16).repeat(num_logprobs)[0:num_logprobs])
+                    label_indices.append(torch.tensor(input_ids[index], dtype=torch.long).repeat(num_logprobs)[0:num_logprobs])
+                    loss_mask_sums.append(1)
+                else:
+                    labels.append(torch.tensor(-100, dtype=torch.bfloat16).repeat(num_logprobs)[0:num_logprobs])
+                    label_indices.append(torch.tensor(tokenizer.pad_token_id, dtype=torch.long).repeat(num_logprobs)[0:num_logprobs])
+                    loss_mask_sums.append(0)
 
         # We want to predict EOS
         input_ids.append(151336)
-        loss_masks.append(True)
-        labels.append([[tokenizer.convert_ids_to_tokens(151336), "-0.00000001"]])
+        labels.append(torch.tensor(float("-0.00000001"), dtype=torch.bfloat16).repeat(num_logprobs)[0:num_logprobs])
+        label_indices.append(torch.tensor(151336, dtype=torch.long).repeat(num_logprobs)[0:num_logprobs])
+        loss_mask_sums.append(1)
 
-        for i in range(len(labels)):
-            temp = []
-            for label in labels[i]:
-                temp.append([tokenizer.convert_tokens_to_ids(label[0]), float(label[1])])
-            labels[i] = temp
-
-        labels_multi_hot = []
-        for label in tqdm(labels):
-            temp_stack = torch.Tensor()
-            temp_stack = temp_stack.to(device='cuda')
-            for sub_label in label:
-                temp_stack = torch.cat((temp_stack, torch.unsqueeze(F.one_hot(torch.tensor(sub_label[0], dtype=torch.int64, device='cuda'), num_classes=151552) * torch.tensor(sub_label[1], dtype=torch.bfloat16, device='cuda'), axis=0)))
-            labels_multi_hot.append(torch.sum(temp_stack, axis=0).to(dtype=torch.bfloat16))
-
-        labels_multi_hot = torch.stack(labels_multi_hot)
-        labels_multi_hot = torch.where(labels_multi_hot == 0, torch.tensor(-100, dtype=torch.bfloat16), labels_multi_hot)
-        labels_multi_hot = labels_multi_hot.to('cpu')
         max_length = max_input_length + max_output_length + 1
 
-        input_ids_np = np.array(input_ids[:max_length])
-        input_ids_np = np.pad(input_ids_np, (0,max_length-input_ids_np.shape[0]), constant_values=0)
-        labels_np = labels_multi_hot[:max_length].to(dtype=torch.float32).numpy()
-        labels_np = np.pad(labels_np, ((0, max_length - labels_np.shape[0]),(0,0)), constant_values=-100)
-        loss_masks_np = np.array(loss_masks[:max_length]).astype(np.float32)
-        loss_masks_np = np.pad(loss_masks_np, (0, max_length - loss_masks_np.shape[0]), constant_values=0)
+        input_ids = torch.tensor(np.array(input_ids[:max_length]), dtype=torch.long)
+        labels = torch.stack(labels)[:max_length]
+        label_indices = torch.stack(label_indices)[:max_length]
+        lm_sum = torch.tensor(np.sum(loss_mask_sums[:max_length]), dtype=torch.bfloat16)
 
         random_integer = np.random.randint(0, 999999999999)
         padded_string = f"{random_integer:012}"
 
-        outfile =  "output_" + padded_string + ".npz"
+        temp_file_dict = {}
 
-        np.savez_compressed(Path(__file__).parent / outfile, input_ids=input_ids_np, labels=labels_np, loss_masks=loss_masks_np)
+        input_ids_prefix = "out_" + padded_string + "_input_ids.pt"
+        torch.save(input_ids, Path(__file__).parent / input_ids_prefix)
+        temp_file_dict['input_ids'] = input_ids_prefix
 
-        saved_files.append(outfile)
+        labels_prefix = "out_" + padded_string + "_labels.pt"
+        torch.save(labels, Path(__file__).parent / labels_prefix)
+        temp_file_dict['labels'] = labels_prefix
 
-    del batched_conv, conv, input_ids, loss_masks, new_input_ids, labels
-    torch.cuda.empty_cache()
+        label_indices_prefix = "out_" + padded_string + "_label_indices.pt"
+        torch.save(label_indices, Path(__file__).parent / label_indices_prefix)
+        temp_file_dict['label_indices'] = label_indices_prefix
+
+        lm_sum_prefix = "out_" + padded_string + "_lm_sum.pt"
+        torch.save(lm_sum, Path(__file__).parent / lm_sum_prefix)
+        temp_file_dict['lm_sum'] = lm_sum_prefix
+
+        saved_files.append(json.dumps(temp_file_dict))
 
     output_path = Path(__file__).parent / "index.txt"
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -163,10 +172,10 @@ def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl
     return
 
 
-def process_logprobs(input_path, max_input_length=30000, max_output_length=2000, enforce_lengths=True, DEBUG_LOSS=False):
+def process_logprobs(input_path, max_input_length=24576, max_output_length=1536, tokenizer_model='THUDM/GLM-4-9B-0414', enforce_lengths=True, DEBUG_LOSS=False):
     """Process logprobs.json and filter tokens not in vocabulary"""
     try:
-        tokenizer = AutoTokenizer.from_pretrained("THUDM/GLM-4-9B-0414", padding_side="left", trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_model, padding_side="left", trust_remote_code=True)
         deepseek_tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-0528", padding_side="left", trust_remote_code=True)
 
         # glmz1_tokenizer = AutoTokenizer.from_pretrained("THUDM/GLM-Z1-Rumination-32B-0414", padding_side="left", trust_remote_code=True)
@@ -253,7 +262,7 @@ def process_logprobs(input_path, max_input_length=30000, max_output_length=2000,
                 if next_logprob['tk'] == token:
                     top_logprobs = next_logprob['tp']
                     for top_logprob in top_logprobs:
-                        if DEBUG_LOSS:
+                        if not DEBUG_LOSS:
                             if top_logprob['tk'] in tokenizer.vocab:
                                 temp_logprobs.append([top_logprob['tk'], str(top_logprob['lp'])])
                             elif top_logprob['tk'] in deepseek_special_tokens:
@@ -317,8 +326,14 @@ def process_logprobs(input_path, max_input_length=30000, max_output_length=2000,
 
 
 def main():
+    max_input_length = 24576
+    max_output_length = 1536
+    model = 'THUDM/GLM-4-9B-0414'
+    logprobs_to_npz(max_input_length=max_input_length, max_output_length=max_output_length, tokenizer_model=model)
+    exit()
+
     # Langfuse -> Logprobs
-    processed = process_logprobs(Path(__file__).parent / "logprobs.json")
+    processed = process_logprobs(Path(__file__).parent / "logprobs.json", max_input_length=max_input_length, max_output_length=max_output_length, tokenizer_model=model)
 
     # Logprobs -> cleaned_logprobs.jsonl
     output_path = Path(__file__).parent / "cleaned_logprobs.jsonl"
@@ -326,8 +341,8 @@ def main():
         f.write('\n'.join(processed))
 
     # cleaned_logprobs.jsonl -> *.npz
-    logprobs_to_npz()
-    eval_to_npz()
+    logprobs_to_npz(max_input_length=max_input_length, max_output_length=max_output_length, tokenizer_model=model)
+    eval_to_npz(max_input_length=max_input_length, max_output_length=max_output_length, tokenizer_model=model)
     logprobs_to_standard()
 
 if __name__ == '__main__':
