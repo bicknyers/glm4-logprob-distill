@@ -28,7 +28,7 @@ from transformers import (
 from transformers import DataCollatorForSeq2Seq as _DataCollatorForSeq2Seq
 from transformers import Seq2SeqTrainer as _Seq2SeqTrainer
 import torch.nn.functional as F
-from transformers.data.data_collator import pad_without_fast_tokenizer_warning
+import json
 
 
 # For Ascend NPU, please add this
@@ -36,6 +36,29 @@ from transformers.data.data_collator import pad_without_fast_tokenizer_warning
 # from torch_npu.contrib import transfer_to_npu
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
+
+
+class TorchSaveDataset(Dataset):
+    def __init__(self, data_dir, file_paths):
+        self.data_dir = data_dir
+        self.file_paths = file_paths
+
+    def __len__(self):
+        return len(self.file_paths)
+
+    def __getitem__(self, idx):
+        input_ids = []
+        labels = []
+        label_indices = []
+        lm_sum = []
+        for id in idx:
+            input_ids.append(torch.load(self.data_dir + self.file_paths[id]['input_ids']))
+            labels.append(torch.load(self.data_dir + self.file_paths[id]['labels']))
+            label_indices.append(torch.load(self.data_dir + self.file_paths[id]['label_indices']))
+            lm_sum.append(torch.load(self.data_dir + self.file_paths[id]['lm_sum']))
+
+        return {'input_ids': input_ids, 'labels': labels, 'label_indices': label_indices, 'lm_sum': lm_sum}
+
 
 
 class NPZDataset(Dataset):
@@ -65,6 +88,53 @@ class NPZDataset(Dataset):
 
 class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
     def __call__(self, features, return_tensors=None):
+        # Torch Save Dataset
+        if 'lm_sum' in features[0]:
+            batch = {}
+            input_ids = []
+            labels = []
+            label_indices = []
+            lm_sum = []
+            seq_sum = []
+
+            for feature in features:
+                seq_sum.append(len(feature['input_ids']))
+            longest_length = max(seq_sum)
+
+            for feature in features:
+                temp = torch.full((longest_length,), fill_value=self.tokenizer.pad_token_id, dtype=torch.long)
+                temp[:len(feature['input_ids'])] = feature['input_ids']
+                input_ids.append(temp)
+
+                temp = torch.full((longest_length,8), fill_value=-100, dtype=torch.bfloat16)
+                temp[:len(feature['labels'])] = feature['labels']
+                labels.append(temp)
+
+                temp = torch.full((longest_length,8), fill_value=self.tokenizer.pad_token_id, dtype=torch.long)
+                temp[:len(feature['label_indices'])] = feature['label_indices']
+                label_indices.append(temp)
+
+                lm_sum.append(feature['lm_sum'])
+
+            input_ids = torch.stack(input_ids)
+            batch['input_ids'] = input_ids
+
+            labels = torch.stack(labels)
+            label_indices = torch.stack(label_indices)
+
+            # TODO: Possible to set 151552 dynamically?
+            temp_labels = torch.full((labels.shape[0], labels.shape[1], 151552), fill_value=-100, dtype=torch.bfloat16)
+            temp_labels = temp_labels.scatter(2, label_indices, labels)
+            batch['labels'] = temp_labels
+
+            seq_sum = torch.tensor(np.sum(seq_sum), dtype=torch.bfloat16)
+            batch['seq_sum'] = seq_sum
+            torch.argmax(temp_labels[0], dim=1)[15:]
+            batch['tokenizer'] = self.tokenizer
+
+            return [batch]
+
+        # NPZ Dataset
         if 'labels' in features[0]:
             if type(features[0]['labels']) is np.ndarray:
                 batch = {}
@@ -81,6 +151,7 @@ class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
 
                 return [batch]
 
+        # Standard Dataset
         output_ids = [feature["output_ids"] for feature in features] if "output_ids" in features[0].keys() else None
         if output_ids is not None:
             max_output_length = max(len(out) for out in output_ids)
@@ -109,23 +180,38 @@ class Seq2SeqTrainer(_Seq2SeqTrainer):
             if self.args.logprob_mode:
                 accum_batch_size = torch.tensor(self.args.gradient_accumulation_steps, dtype=torch.bfloat16)
 
-                # Use precomputed logprobs from input data
-                labels = inputs[0]["labels"]
-
                 # Reshape inputs for model
                 outputs = model(input_ids=inputs[0]["input_ids"])
 
-                # Get model's log probabilities for each token
-                logits = outputs.logits.to(dtype=torch.bfloat16)
-                log_probs = torch.nn.functional.log_softmax(logits, dim=2)
+                # Mask inputs before calc. loss fn.
+                mask = torch.unsqueeze(torch.max(inputs[0]["labels"] > -100, dim=2)[0], dim=2)
 
-                # labels_softmax = torch.nn.functional.softmax(labels, dim=2)
+                # Get model's log probabilities for each token
+                # logits = outputs.logits.to(dtype=torch.bfloat16)
+                log_probs = torch.nn.functional.log_softmax(outputs.logits.to(dtype=torch.bfloat16), dim=2)
+
+                # Use precomputed logprobs from input data
+                labels_softmax = torch.nn.functional.softmax(inputs[0]["labels"], dim=2)
+
+                # print(torch.argmax(labels_softmax, dim=2)[0])
+                # print(torch.argmax(log_probs, dim=2)[0])
+                # print()
+                #
+                # print(torch.argmax(labels_softmax, dim=2)[1])
+                # print(torch.argmax(log_probs, dim=2)[1])
+                # print()
+                #
+                # print(torch.argmax(labels_softmax, dim=2)[2])
+                # print(torch.argmax(log_probs, dim=2)[2])
+                # print()
+
+                log_probs = log_probs * mask
+                labels_softmax = labels_softmax * mask
 
                 # Calculate loss
                 # loss = F.cross_entropy(input=logits, target=labels.exp(), reduction="none")
-                loss = F.kl_div(log_probs, labels, reduction="none", log_target=True)
-                loss = loss * (labels != -100)
-                loss = loss.sum() / (inputs[0]['mask_sum'] * accum_batch_size) # batchmean kl_div, hf trainer can't count logprob batches
+                loss = F.kl_div(log_probs, labels_softmax, reduction="none", log_target=False)
+                loss = loss.sum() / (inputs[0]['seq_sum'] * accum_batch_size) # batchmean kl_div, hf trainer can't count logprob batches
 
                 return (loss, outputs) if return_outputs else loss
 
@@ -376,12 +462,10 @@ def process_batch_eval(
             new_input_ids = tokenizer.apply_chat_template(conv, tokenize=True, return_dict=False)
             input_ids = new_input_ids
             last_assistant_index = len(input_ids) - input_ids[::-1].index(151337) - 1
-            output_prompt, output_ids = (
-                input_ids[:1],
-                input_ids[last_assistant_index:],
-            )
+            output_ids = input_ids[last_assistant_index+1:]
             output_ids.append(151336)
-            batched_input_ids.append(input_ids[:max_input_length] + output_prompt[:1])
+
+            batched_input_ids.append(input_ids[:last_assistant_index+1])
             batched_output_ids.append(output_ids[:max_output_length])
         else:
             input_ids = [151331, 151333]
@@ -401,7 +485,7 @@ def process_batch_eval(
                         batched_output_ids.append(output_ids[:max_output_length])
                     input_ids += new_input_ids
 
-    del batched_conv, conv, input_ids, new_input_ids, output_prompt, output_ids
+    del batched_conv, conv, input_ids, new_input_ids, output_ids
     torch.cuda.empty_cache()
 
     return {"input_ids": batched_input_ids, "output_ids": batched_output_ids}
@@ -443,9 +527,14 @@ def compute_metrics(eval_preds: EvalPrediction, tokenizer):
     batched_label_ids[batched_label_ids == -100] = tokenizer.pad_token_id
     metrics_dct = {"rouge-1": [], "rouge-2": [], "rouge-l": [], "bleu-4": []}
     for pred_ids, label_ids in zip(batched_pred_ids, batched_label_ids):
+        # Strip pad tokens to get accurate eval scores
+        pred_ids[pred_ids == tokenizer.pad_token_id] = 198
+        label_ids[label_ids == tokenizer.pad_token_id] = 198
         pred_txt = tokenizer.decode(pred_ids).strip()
-        print(pred_txt)
         label_txt = tokenizer.decode(label_ids).strip()
+        print(label_txt)
+        print(pred_txt)
+        print()
         pred_tokens = list(jieba.cut(pred_txt))
         label_tokens = list(jieba.cut(label_txt))
         rouge = Rouge()
@@ -494,16 +583,43 @@ def main(
         test_file_paths = []
         with open(data_dir + ft_config.data_config.data_files['train'], 'r') as f:
             for line in f:
-                train_file_paths.append(data_dir + line.strip())
+                train_file_paths.append(json.loads(line))
         with open(data_dir + ft_config.data_config.data_files['validation'], 'r') as f:
             for line in f:
                 val_file_paths.append(data_dir + line.strip())
         with open(data_dir + ft_config.data_config.data_files['test'], 'r') as f:
             for line in f:
                 test_file_paths.append(data_dir + line.strip())
-        train_dataset = NPZDataset(train_file_paths)
-        val_dataset = NPZDataset(val_file_paths)
-        test_dataset = NPZDataset(test_file_paths)
+        train_dataset = TorchSaveDataset(data_dir, train_file_paths)
+
+        # A little hacky but it allows us to run evals on standard completions as opposed to torch save format
+        modified_data_config = ft_config.data_config
+        modified_data_config.data_files['train'] = 'standard.jsonl'
+        modified_data_config.train_file = 'standard.jsonl'
+        data_manager = DataManager(data_dir, modified_data_config)
+
+        val_dataset = data_manager.get_dataset(
+            Split.VALIDATION,
+            functools.partial(
+                process_batch_eval,
+                tokenizer=tokenizer,
+                combine=ft_config.combine,
+                max_input_length=ft_config.max_input_length,
+                max_output_length=ft_config.max_output_length,
+            ),
+            batched=True,
+        )
+        test_dataset = data_manager.get_dataset(
+            Split.TEST,
+            functools.partial(
+                process_batch_eval,
+                tokenizer=tokenizer,
+                combine=ft_config.combine,
+                max_input_length=ft_config.max_input_length,
+                max_output_length=ft_config.max_output_length,
+            ),
+            batched=True,
+        )
 
     else:
         data_manager = DataManager(data_dir, ft_config.data_config)
