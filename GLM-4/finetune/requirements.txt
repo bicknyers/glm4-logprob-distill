@@ -10,3 +10,5 @@ tqdm>=4.67.0
 mpi4py
 torchao
 tensorboard
+transformers>=4.52.4
+git+https://github.com/vllm-project/llm-compressor.git
