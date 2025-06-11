@@ -1,7 +1,9 @@
 .idea/
 
+/GLM-4/finetune/plots/
 GLM-4/my_data/*
 *.npz
+*.pt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
