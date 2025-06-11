@@ -35,6 +35,7 @@ class MyCustomHandler(CustomLogger): # https://docs.litellm.ai/docs/observabilit
         ]):
         data["logprobs"] = True
         data["top_logprobs"] = 8
+        data["top_p"] = 0.0001
         return data
 
     @observe()
