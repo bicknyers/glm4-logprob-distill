@@ -187,27 +187,29 @@ def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(
     os.makedirs(output_dir, exist_ok=True)
     
     # Plot input tokens distribution
-    plt.figure(figsize=(10, 6))
-    plt.hist(input_tokens, bins=50, alpha=0.7, color='blue')
+    plt.figure(figsize=(6, 4), dpi=200)
+    plt.hist(input_tokens, bins=20, alpha=0.7, color='blue')
     plt.title('Distribution of GLM Input Tokens')
     plt.xlabel('Number of Tokens')
     plt.ylabel('Frequency')
     plt.grid(True)
     plt.savefig(output_dir / 'input_tokens_distribution.png')
+    plt.show()
     plt.close()
     
     # Plot output tokens distribution
-    plt.figure(figsize=(10, 6))
-    plt.hist(output_tokens, bins=50, alpha=0.7, color='green')
+    plt.figure(figsize=(6, 4), dpi=200)
+    plt.hist(output_tokens, bins=20, alpha=0.7, color='green')
     plt.title('Distribution of GLM Output Tokens')
     plt.xlabel('Number of Tokens')
     plt.ylabel('Frequency')
     plt.grid(True)
     plt.savefig(output_dir / 'output_tokens_distribution.png')
+    plt.show()
     plt.close()
     
     # Plot message counts distribution
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(6, 4), dpi=200)
     plt.hist(message_counts, bins=range(min(message_counts), max(message_counts)+2),
              alpha=0.7, color='purple', align='left')
     plt.title('Distribution of Message Counts in Prompts')
@@ -216,6 +218,7 @@ def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(
     plt.xticks(range(min(message_counts), max(message_counts)+1))
     plt.grid(True)
     plt.savefig(output_dir / 'message_counts_distribution.png')
+    plt.show()
     plt.close()
     
     print(f"Saved visualization plots to {output_dir}")
