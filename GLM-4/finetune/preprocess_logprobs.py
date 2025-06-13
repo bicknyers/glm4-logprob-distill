@@ -188,7 +188,7 @@ def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(
     
     # Plot input tokens distribution
     plt.figure(figsize=(6, 4), dpi=200)
-    plt.hist(input_tokens, bins=20, alpha=0.7, color='blue')
+    plt.hist(input_tokens, bins=20, alpha=0.95, color='blue')
     plt.title('Distribution of GLM Input Tokens')
     plt.xlabel('Number of Tokens')
     plt.ylabel('Frequency')
@@ -199,7 +199,7 @@ def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(
     
     # Plot output tokens distribution
     plt.figure(figsize=(6, 4), dpi=200)
-    plt.hist(output_tokens, bins=20, alpha=0.7, color='green')
+    plt.hist(output_tokens, bins=20, alpha=0.95, color='green')
     plt.title('Distribution of GLM Output Tokens')
     plt.xlabel('Number of Tokens')
     plt.ylabel('Frequency')
@@ -210,17 +210,29 @@ def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(
     
     # Plot message counts distribution
     plt.figure(figsize=(6, 4), dpi=200)
-    plt.hist(message_counts, bins=range(min(message_counts), max(message_counts)+2),
-             alpha=0.7, color='purple', align='left')
+    plt.hist(message_counts, bins=range(min(message_counts), max(message_counts)+2, 2),
+             alpha=0.95, color='purple', align='left')
     plt.title('Distribution of Message Counts in Prompts')
     plt.xlabel('Number of Messages')
     plt.ylabel('Frequency')
-    plt.xticks(range(min(message_counts), max(message_counts)+1))
+    plt.xticks(range(min(message_counts), max(message_counts)+2, 2))
     plt.grid(True)
     plt.savefig(output_dir / 'message_counts_distribution.png')
     plt.show()
     plt.close()
-    
+
+
+    # Plot input vs. output distribution
+    plt.figure(figsize=(6, 4), dpi=200)
+    plt.scatter(input_tokens, output_tokens, alpha=0.95, color='orange')
+    plt.title('Distribution of GLM I/O Tokens')
+    plt.xlabel('Number of Input Tokens')
+    plt.ylabel('Number of Output Tokens')
+    plt.grid(True)
+    plt.savefig(output_dir / 'io_tokens_distribution.png')
+    plt.show()
+    plt.close()
+
     print(f"Saved visualization plots to {output_dir}")
 
 
