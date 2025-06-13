@@ -6,6 +6,8 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizer
+import matplotlib.pyplot as plt
+import os
 
 
 def load_logprobs_jsonl(file_path):
@@ -172,6 +174,53 @@ def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl
     return
 
 
+def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(__file__).parent):
+    """
+    Generate matplotlib plots for input tokens, output tokens, and message counts.
+    
+    Args:
+        input_tokens (list): List of input token counts
+        output_tokens (list): List of output token counts
+        message_counts (list): List of message counts
+        output_dir (Path): Directory to save plots
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Plot input tokens distribution
+    plt.figure(figsize=(10, 6))
+    plt.hist(input_tokens, bins=50, alpha=0.7, color='blue')
+    plt.title('Distribution of GLM Input Tokens')
+    plt.xlabel('Number of Tokens')
+    plt.ylabel('Frequency')
+    plt.grid(True)
+    plt.savefig(output_dir / 'input_tokens_distribution.png')
+    plt.close()
+    
+    # Plot output tokens distribution
+    plt.figure(figsize=(10, 6))
+    plt.hist(output_tokens, bins=50, alpha=0.7, color='green')
+    plt.title('Distribution of GLM Output Tokens')
+    plt.xlabel('Number of Tokens')
+    plt.ylabel('Frequency')
+    plt.grid(True)
+    plt.savefig(output_dir / 'output_tokens_distribution.png')
+    plt.close()
+    
+    # Plot message counts distribution
+    plt.figure(figsize=(10, 6))
+    plt.hist(message_counts, bins=range(min(message_counts), max(message_counts)+2),
+             alpha=0.7, color='purple', align='left')
+    plt.title('Distribution of Message Counts in Prompts')
+    plt.xlabel('Number of Messages')
+    plt.ylabel('Frequency')
+    plt.xticks(range(min(message_counts), max(message_counts)+1))
+    plt.grid(True)
+    plt.savefig(output_dir / 'message_counts_distribution.png')
+    plt.close()
+    
+    print(f"Saved visualization plots to {output_dir}")
+
+
 def process_logprobs(input_path, max_input_length=24576, max_output_length=1536, tokenizer_model='THUDM/GLM-4-9B-0414', enforce_lengths=True, DEBUG_LOSS=False):
     """Process logprobs.json and filter tokens not in vocabulary"""
     try:
@@ -223,7 +272,19 @@ def process_logprobs(input_path, max_input_length=24576, max_output_length=1536,
 
         output = []
         line_index = 0
+        
+        # Lists to store metrics for visualization
+        input_token_counts = []
+        output_token_counts = []
+        message_counts = []
+        
         for line in logprobs_data:
+            if line['name'] != 'async_custom_logprob_hook':
+                print('WARNING: Endpoint ' + line['name'] + ' does not match async_custom_logprob_hook. Dropping line.')
+                continue
+            if line['input']['args'][0] != 'OR DS R1 0528 Paid':
+                print('WARNING: Model name ' + line['input']['args'][0] + ' not found. Dropping line.')
+                continue
             error_occured = False
             line_index += 1
             temp_prompt = line['input']['args'][1]
@@ -300,6 +361,11 @@ def process_logprobs(input_path, max_input_length=24576, max_output_length=1536,
             print("INFO: Input Tokens Deepseek " + str(deepseek_input_len) + " -> GLM " + str(glm_input_len))
             print("INFO: Input Tokens Ratio " + str(round(deepseek_input_len / glm_input_len, 4)))
             print("INFO: Output Tokens GLM " + str(len(write_logprobs)))
+            
+            # Collect metrics for visualization
+            input_token_counts.append(glm_input_len)
+            output_token_counts.append(len(write_logprobs))
+            message_counts.append(len(prompt))
 
             if enforce_lengths:
                 # Use "+ 5" to account for special tokens/padding buffer
@@ -319,6 +385,15 @@ def process_logprobs(input_path, max_input_length=24576, max_output_length=1536,
                     "logprobs": write_logprobs
                 }))
 
+        # Generate plots after processing all data
+        if input_token_counts:
+            generate_plots(
+                input_tokens=input_token_counts,
+                output_tokens=output_token_counts,
+                message_counts=message_counts,
+                output_dir=Path(__file__).parent
+            )
+        
         return output
     except FileNotFoundError:
         print(f"Error: File not found - {input_path}", file=sys.stderr)
@@ -329,8 +404,6 @@ def main():
     max_input_length = 24576
     max_output_length = 1536
     model = 'THUDM/GLM-4-9B-0414'
-    logprobs_to_npz(max_input_length=max_input_length, max_output_length=max_output_length, tokenizer_model=model)
-    exit()
 
     # Langfuse -> Logprobs
     processed = process_logprobs(Path(__file__).parent / "logprobs.json", max_input_length=max_input_length, max_output_length=max_output_length, tokenizer_model=model)
