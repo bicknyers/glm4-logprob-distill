@@ -8,6 +8,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizer
 import matplotlib.pyplot as plt
 import os
+import math
 
 
 def load_logprobs_jsonl(file_path):
@@ -174,10 +175,10 @@ def logprobs_to_npz(input_file = Path(__file__).parent / "cleaned_logprobs.jsonl
     return
 
 
-def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(__file__).parent):
+def generate_plots(input_tokens, output_tokens, message_counts, top_lp_counts, output_dir=Path(__file__).parent):
     """
     Generate matplotlib plots for input tokens, output tokens, and message counts.
-    
+
     Args:
         input_tokens (list): List of input token counts
         output_tokens (list): List of output token counts
@@ -185,7 +186,7 @@ def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(
         output_dir (Path): Directory to save plots
     """
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Plot input tokens distribution
     plt.figure(figsize=(6, 4), dpi=200)
     plt.hist(input_tokens, bins=20, alpha=0.95, color='blue')
@@ -196,7 +197,7 @@ def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(
     plt.savefig(output_dir / 'input_tokens_distribution.png')
     plt.show()
     plt.close()
-    
+
     # Plot output tokens distribution
     plt.figure(figsize=(6, 4), dpi=200)
     plt.hist(output_tokens, bins=20, alpha=0.95, color='green')
@@ -207,7 +208,7 @@ def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(
     plt.savefig(output_dir / 'output_tokens_distribution.png')
     plt.show()
     plt.close()
-    
+
     # Plot message counts distribution
     plt.figure(figsize=(6, 4), dpi=200)
     plt.hist(message_counts, bins=range(min(message_counts), max(message_counts)+2, 2),
@@ -221,6 +222,18 @@ def generate_plots(input_tokens, output_tokens, message_counts, output_dir=Path(
     plt.show()
     plt.close()
 
+    # Plot top_lp_counts distribution
+    plt.figure(figsize=(6, 4), dpi=200)
+    plt.hist(top_lp_counts, bins=range(math.floor(min(top_lp_counts)), math.ceil(max(top_lp_counts)+1), 1),
+             alpha=0.95, color='cyan', align='left')
+    plt.title('Distribution of Top Logprob Counts')
+    plt.xlabel('Number of Logprobs')
+    plt.ylabel('Frequency')
+    plt.xticks(range(math.floor(min(top_lp_counts)), math.ceil(max(top_lp_counts)+1), 1))
+    plt.grid(True)
+    plt.savefig(output_dir / 'top_lp_counts_distribution.png')
+    plt.show()
+    plt.close()
 
     # Plot input vs. output distribution
     plt.figure(figsize=(6, 4), dpi=200)
@@ -268,6 +281,11 @@ def process_logprobs(input_path, max_input_length=24576, max_output_length=1536,
             "<｜end▁of▁sentence｜>": "<|endoftext|>",
         }
 
+        banned_tokens = [
+            "<thinking>",
+            "</thinking>"
+        ]
+
         # Find/replace deepseek special tokens first
         with open(input_path, 'r', encoding='utf-8') as f:
             file_content = f.read()
@@ -287,12 +305,13 @@ def process_logprobs(input_path, max_input_length=24576, max_output_length=1536,
 
         output = []
         line_index = 0
-        
+
         # Lists to store metrics for visualization
         input_token_counts = []
         output_token_counts = []
         message_counts = []
-        
+        top_lp_counts = []
+
         for line in logprobs_data:
             if line['name'] != 'async_custom_logprob_hook':
                 print('WARNING: Endpoint ' + line['name'] + ' does not match async_custom_logprob_hook. Dropping line.')
@@ -329,7 +348,21 @@ def process_logprobs(input_path, max_input_length=24576, max_output_length=1536,
             logprobs = line['input']['args'][3]
             # Filter tokens that exist in vocab
             write_logprobs = []
-            for token in tokenized_completion:
+            skip = -1
+            for i in range(len(tokenized_completion)):
+                token = tokenized_completion[i]
+
+                if skip >= 0:
+                    skip -= 1
+                    continue
+                if i < len(tokenized_completion) - 2:
+                    look_ahead = tokenized_completion[i] + tokenized_completion[i+1] + tokenized_completion[i+2]
+                    for banned_token in banned_tokens:
+                        if banned_token in look_ahead:
+                            skip = 1
+                    if skip >= 0:
+                        continue
+
                 temp_logprobs = []
                 try:
                     next_logprob = logprobs.pop(0)
@@ -376,11 +409,16 @@ def process_logprobs(input_path, max_input_length=24576, max_output_length=1536,
             print("INFO: Input Tokens Deepseek " + str(deepseek_input_len) + " -> GLM " + str(glm_input_len))
             print("INFO: Input Tokens Ratio " + str(round(deepseek_input_len / glm_input_len, 4)))
             print("INFO: Output Tokens GLM " + str(len(write_logprobs)))
-            
+
             # Collect metrics for visualization
             input_token_counts.append(glm_input_len)
             output_token_counts.append(len(write_logprobs))
             message_counts.append(len(prompt))
+
+            temp_count = []
+            for lp in write_logprobs:
+                temp_count.append(len(lp))
+            top_lp_counts.append(np.average(temp_count))
 
             if enforce_lengths:
                 # Use "+ 5" to account for special tokens/padding buffer
@@ -406,9 +444,10 @@ def process_logprobs(input_path, max_input_length=24576, max_output_length=1536,
                 input_tokens=input_token_counts,
                 output_tokens=output_token_counts,
                 message_counts=message_counts,
+                top_lp_counts=top_lp_counts,
                 output_dir=Path(__file__).parent
             )
-        
+
         return output
     except FileNotFoundError:
         print(f"Error: File not found - {input_path}", file=sys.stderr)
