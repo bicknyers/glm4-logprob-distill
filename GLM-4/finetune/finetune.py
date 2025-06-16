@@ -37,6 +37,9 @@ import json
 
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
+# Enable Flash Attention globally
+torch.backends.cuda.enable_flash_sdp(True)
+
 
 class TorchSaveDataset(Dataset):
     def __init__(self, data_dir, file_paths):
@@ -501,6 +504,7 @@ def load_tokenizer_and_model(
             model_dir,
             use_cache=False,
             torch_dtype=torch.bfloat16,  # Must use BFloat 16
+            attn_implementation="flash_attention_2"
         )
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
@@ -517,6 +521,7 @@ def load_tokenizer_and_model(
             model_dir,
             use_cache=False,
             torch_dtype=torch.bfloat16,
+            attn_implementation="flash_attention_2"
         )
     return tokenizer, model
 
