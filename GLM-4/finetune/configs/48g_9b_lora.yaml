@@ -1,44 +1,45 @@
 data_config:
   train_file: index.txt
-  val_file: eval_index.txt
-  test_file: eval_index.txt
-  num_proc: 3
+  val_file: standard.jsonl
+  test_file: standard.jsonl
+  num_proc: 1
 
 combine: True
 freezeV: True
-max_input_length: 24576
-max_output_length: 1536
+max_input_length: 12000
+max_output_length: 384
 swanlab: "local"  # set to local if don`t use cloud
 
 training_args:
   # see `transformers.Seq2SeqTrainingArguments`
   gradient_checkpointing: true
   # https://github.com/huggingface/transformers/blob/e8b292e35f331d3c3de85f7e5d3496b0e13d3d6f/src/transformers/training_args.py#L156
-  optim: "adamw_torch_8bit"
+  # optim: "adamw_torch_8bit"
+  # optim: "galore_adamw"
   bf16: true
   output_dir: ./output
-  max_steps: 4
+  num_train_epochs: 2
   # needed to be fit for the dataset
-  learning_rate: 8e-5
+  learning_rate: 2e-5
   # settings for data loading
   dataloader_drop_last: true
   per_device_train_batch_size: 1
-  gradient_accumulation_steps: 3
-  dataloader_num_workers: 4
+  gradient_accumulation_steps: 8
+  dataloader_num_workers: 8
   remove_unused_columns: false
   # settings for saving checkpoints
-  save_strategy: steps
-  save_steps: 4
+  save_strategy: epoch
+  # save_steps: 15
   # settings for logging
   log_level: info
   logging_strategy: steps
   logging_steps: 1
-  run_name: "glm4-sft-finetune"
+  run_name: "glm4-lora-finetune"
   report_to: "tensorboard"
   # settings for evaluation
   per_device_eval_batch_size: 1
   eval_strategy: steps
-  eval_steps: 1
+  eval_steps: 5
   # settings for optimizer
   # adam_epsilon: 1e-6
   # uncomment the following line to detect nan or inf values
@@ -46,6 +47,15 @@ training_args:
   predict_with_generate: true
   # see `transformers.GenerationConfig`
   generation_config:
-    max_new_tokens: 1536
+    max_new_tokens: 384
   # set your absolute deepspeed path here
   deepspeed: configs/ds_zero_3.json
+  # deepspeed: configs/ds_zero_2.json
+
+peft_config:
+  peft_type: LORA
+  task_type: CAUSAL_LM
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.1
+  target_modules: ["q_proj", "k_proj", "v_proj"]
