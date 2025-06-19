@@ -12,5 +12,4 @@ torchao
 tensorboard
 transformers>=4.52.4
 matplotlib
-flash-attn
 git+https://github.com/vllm-project/llm-compressor.git
