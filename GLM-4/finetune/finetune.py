@@ -42,9 +42,10 @@ torch.backends.cuda.enable_flash_sdp(True)
 
 
 class TorchSaveDataset(Dataset):
-    def __init__(self, data_dir, file_paths):
+    def __init__(self, data_dir, file_paths, max_output_len):
         self.data_dir = data_dir
         self.file_paths = file_paths
+        self.max_output_len = max_output_len
 
     def __len__(self):
         return len(self.file_paths)
@@ -54,13 +55,16 @@ class TorchSaveDataset(Dataset):
         labels = []
         label_indices = []
         lm_sum = []
+        max_output_len = []
         for id in idx:
             input_ids.append(torch.load(self.data_dir + self.file_paths[id]['input_ids']))
             labels.append(torch.load(self.data_dir + self.file_paths[id]['labels']))
             label_indices.append(torch.load(self.data_dir + self.file_paths[id]['label_indices']))
             lm_sum.append(torch.load(self.data_dir + self.file_paths[id]['lm_sum']))
+            max_output_len.append(torch.tensor(self.max_output_len, dtype=torch.bfloat16))
+            # max_output_len.append(torch.full(lm_sum[-1].shape, self.max_output_len, dtype=torch.bfloat16))
 
-        return {'input_ids': input_ids, 'labels': labels, 'label_indices': label_indices, 'lm_sum': lm_sum}
+        return {'input_ids': input_ids, 'labels': labels, 'label_indices': label_indices, 'lm_sum': lm_sum, 'max_output_len': max_output_len}
 
 
 
@@ -97,15 +101,16 @@ class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
             input_ids = []
             labels = []
             label_indices = []
-            lm_sum = []
+            # lm_sum = []
             seq_sum = []
 
+            max_output_len = round(features[0]['max_output_len'].item())
             for feature in features:
                 seq_sum.append(len(feature['input_ids']))
-            longest_length = max(seq_sum)
+            longest_length = max(max(seq_sum), max_output_len)
 
             for feature in features:
-                temp = torch.full((longest_length,), fill_value=self.tokenizer.pad_token_id, dtype=torch.long)
+                temp = torch.full((longest_length,), fill_value=self.tokenizer.pad_token_id, dtype=torch.int)
                 temp[:len(feature['input_ids'])] = feature['input_ids']
                 input_ids.append(temp)
 
@@ -113,11 +118,11 @@ class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
                 temp[:len(feature['labels'])] = feature['labels']
                 labels.append(temp)
 
-                temp = torch.full((longest_length,8), fill_value=self.tokenizer.pad_token_id, dtype=torch.long)
+                temp = torch.full((longest_length,8), fill_value=self.tokenizer.pad_token_id, dtype=torch.int)
                 temp[:len(feature['label_indices'])] = feature['label_indices']
                 label_indices.append(temp)
 
-                lm_sum.append(feature['lm_sum'])
+                # lm_sum.append(torch.min(torch.stack((feature['lm_sum'], feature['max_output_len']), dim=0), dim=0)[0])
 
             input_ids = torch.stack(input_ids)
             batch['input_ids'] = input_ids
@@ -126,14 +131,14 @@ class DataCollatorForSeq2Seq(_DataCollatorForSeq2Seq):
             label_indices = torch.stack(label_indices)
 
             # TODO: Possible to set 151552 dynamically?
-            temp_labels = torch.full((labels.shape[0], labels.shape[1], 151552), fill_value=-100, dtype=torch.bfloat16)
-            temp_labels = temp_labels.scatter(2, label_indices, labels)
+            temp_labels = torch.full((labels.shape[0], max_output_len, 151552), fill_value=-100, dtype=torch.bfloat16)
+            temp_labels = temp_labels.scatter(2, label_indices[:, -max_output_len:,:].to(dtype=torch.long), labels[:, -max_output_len:,:])
             batch['labels'] = temp_labels
 
             seq_sum = torch.tensor(np.sum(seq_sum), dtype=torch.bfloat16)
             batch['seq_sum'] = seq_sum
-            torch.argmax(temp_labels[0], dim=1)[15:]
             batch['tokenizer'] = self.tokenizer
+            batch['max_output_len'] = max_output_len
 
             return [batch]
 
@@ -191,7 +196,8 @@ class Seq2SeqTrainer(_Seq2SeqTrainer):
 
                 # Get model's log probabilities for each token
                 # logits = outputs.logits.to(dtype=torch.bfloat16)
-                log_probs = torch.nn.functional.log_softmax(outputs.logits.to(dtype=torch.bfloat16), dim=2)
+                # log_probs = torch.nn.functional.log_softmax(outputs.logits.to(dtype=torch.bfloat16), dim=2)
+                log_probs = torch.nn.functional.log_softmax(outputs.logits[:, -inputs[0]['max_output_len']:, :].to(dtype=torch.bfloat16), dim=2)
 
                 # Use precomputed logprobs from input data
                 labels_softmax = torch.nn.functional.softmax(inputs[0]["labels"], dim=2)
@@ -214,6 +220,7 @@ class Seq2SeqTrainer(_Seq2SeqTrainer):
                 # Calculate loss
                 # loss = F.cross_entropy(input=logits, target=labels.exp(), reduction="none")
                 loss = F.kl_div(log_probs, labels_softmax, reduction="none", log_target=False)
+                # loss = loss.sum() / (mask.sum() * accum_batch_size)  # batchmean kl_div, hf trainer can't count logprob batches
                 loss = loss.sum() / (inputs[0]['seq_sum'] * accum_batch_size) # batchmean kl_div, hf trainer can't count logprob batches
 
                 return (loss, outputs) if return_outputs else loss
@@ -247,7 +254,7 @@ class Seq2SeqTrainer(_Seq2SeqTrainer):
             labels = output_ids
 
             del inputs, input_ids, output_ids
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
 
         return loss, generated_tokens, labels
 
@@ -444,7 +451,7 @@ def process_batch(
         batched_labels.append(labels[:max_length])
 
     del batched_conv, conv, input_ids, loss_masks, new_input_ids, labels
-    torch.cuda.empty_cache()
+    # torch.cuda.empty_cache()
 
     return {"input_ids": batched_input_ids, "labels": batched_labels}
 
@@ -489,7 +496,7 @@ def process_batch_eval(
                     input_ids += new_input_ids
 
     del batched_conv, conv, input_ids, new_input_ids, output_ids
-    torch.cuda.empty_cache()
+    # torch.cuda.empty_cache()
 
     return {"input_ids": batched_input_ids, "output_ids": batched_output_ids}
 
@@ -595,7 +602,7 @@ def main(
         with open(data_dir + ft_config.data_config.data_files['test'], 'r') as f:
             for line in f:
                 test_file_paths.append(data_dir + line.strip())
-        train_dataset = TorchSaveDataset(data_dir, train_file_paths)
+        train_dataset = TorchSaveDataset(data_dir, train_file_paths, ft_config.max_output_length)
 
         # A little hacky but it allows us to run evals on standard completions as opposed to torch save format
         modified_data_config = ft_config.data_config
